@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: orangefox
+    env: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python3 app.py
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: PANEL_PASSWORD
+        generateValue: true

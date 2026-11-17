@@ -250,7 +250,9 @@ class DB:
                     id SERIAL PRIMARY KEY,
                     ts TEXT NOT NULL, path TEXT, routing TEXT,
                     headers TEXT, raw_body TEXT, inner_json TEXT,
-                    reply TEXT, http_code INTEGER)"""]
+                    reply TEXT, http_code INTEGER)""",
+                """CREATE TABLE IF NOT EXISTS issued_sids(
+                    sid TEXT PRIMARY KEY, exp INTEGER NOT NULL)"""]
         else:
             stmts = [
                 """CREATE TABLE IF NOT EXISTS keys(
@@ -283,7 +285,9 @@ class DB:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     ts TEXT NOT NULL, path TEXT, routing TEXT,
                     headers TEXT, raw_body TEXT, inner_json TEXT,
-                    reply TEXT, http_code INTEGER)"""]
+                    reply TEXT, http_code INTEGER)""",
+                """CREATE TABLE IF NOT EXISTS issued_sids(
+                    sid TEXT PRIMARY KEY, exp INTEGER NOT NULL)"""]
         cur = self.con.cursor()
         for s in stmts:
             cur.execute(s)
@@ -449,15 +453,13 @@ PUBLIC_BASE = os.environ.get("PANEL_BASE", "https://ofkey.onrender.com")
 VSP3_PRIV_PATH = os.path.join(HERE, "vsp3_privkey.bin")
 VSP3_PUB_PATH = os.path.join(HERE, "vsp3_pubkey.hex")
 VSP3_KID = 1
-_PACK_PATH = os.path.join(HERE, "genuine_pack.json")
-if os.path.exists(_PACK_PATH):
-    VSP_PACK = json.load(open(_PACK_PATH))
-else:
-    # No genuine pack was ever captured from the real server (stage-2 success
-    # payloads for the Trial key contain no "pack" member at all — see
-    # genuine_stage2_response.json). Empty object: the client parses and
-    # extracts it fine (proven in emulation, run_resp_valid.log).
-    VSP_PACK = {}
+# Genuine current-build pack (117 keys), captured from the real server's
+# GET /api/offsets on 2026-11-17 (see POST_AUTH.md) and embedded as a
+# literal: the Render deploy carries only app.py, so no side file can be
+# relied on. This is the pack the patched core fetches from /offsets
+# after login; it is also the stage-2 reply's "pack" member.
+GENUINE_PACK = {'_credit': 'Server-managed GameCfg offsets — client har feature ke offsets yahan se fetch karta hai', 'head': 1704, 'hip': 1712, 'spine': 1720, 'root': 1744, 'left_ankle': 1760, 'right_ankle': 1768, 'left_shoulder': 1808, 'right_shoulder': 1816, 'left_hand': 1832, 'right_hand': 1824, 'collider': 1752, 'main_camera': 1008, 'follow_camera': 1688, 'is_firing': 2016, 'aim_info': 3672, 'aim_start': 76, 'aim_dir': 64, 'player_rot': 6820, 'game_facade_rva': 181833240, 'gf_static': 184, 'base_game': 8, 'match': 144, 'match_running': 204, 'local_player': 216, 'dictionary': 192, 'entity_list': 24, 'avatar_mgr': 1912, 'cam_comp': 48, 'cam_intptr': 16, 'cam_matrix': 256, 'xf_obj': 16, 'xf_index': 64, 'xf_matrix': 56, 'xf_list': 24, 'xf_indices': 32, 'xf_stride': 48, 'avatar_simple': 312, 'avatar_visible': 257, 'uma_data': 40, 'uma_dead': 129, 'enemy_dead': 124, 'enemy_knock': 0, 'enemy_name': 1184, 'enemy_bot': 1192, 'knock_comp': 7520, 'knock_flag': 16, 'hp_c0': 112, 'hp_c1': 16, 'hp_c2': 32, 'hp_val': 24, 'time_service': 32, 'time_scale': 44, 'observe_cur': 256, 'observe_player': 48, 'ghost_hack': 2068, 'dict_count': 32, 'dict_array_header': 32, 'dict_entry_stride': 24, 'dict_entry_value': 16, 'player_hed_colider': 1752, 'player_col_write': 128, 'player_death_info': 8848, 'uma_data_skip': 129, 'main_camera_fallback': 1008, 'weapon_instance': 1440, 'reload_instance': 1800, 'inventory_manager': 1864, 'status_struct': 7520, 'firing_state': 2056, 'view_rotation': 6820, 'is_spectating': 124, 'head_collider': 1752, 'aim_target_write': 128, 'client_bot_check': 1192, 'name_ptr': 1184, 'aiming_info': 3672, 'aiming_info_start': 76, 'aiming_info_dir': 64, 'health_chain1': 112, 'health_chain2': 16, 'health_chain3': 32, 'health_value': 24, 'is_dead': 124, 'time_service_speed': 44, 'weapon_data': 136, 'recoil_value': 24, 'fast_reload_trigger': 217, 'status_data': 32, 'state_id': 16, 'uma_simple': 312, 'is_visible': 257, 'avatar_is_dead': 129, 'active_item': 160, 'weapon_component': 128, 'no_recoil': 24, 'item_data': 40, 'weapon_id': 72, 'bone_head': 1704, 'bone_chest': 1720, 'bone_hip': 1712, 'bone_feet': 1744, 'bone_lshoulder': 1808, 'bone_rshoulder': 1816, 'bone_lhand': 1832, 'bone_rhand': 1824, 'bone_lankle': 1760, 'bone_rankle': 1768, 'xf_enemy_pos_force': 56, 's_aim2': 3680, 's_aim3': 64, 's_aim4': 208, 'player_attributes': 1904, 'shoot_no_reload': 273, 'base_game_ptr': 184, 'cam_object': 48, 'xf_index_size': 4}
+VSP_PACK = GENUINE_PACK
 
 _P25519 = 2 ** 255 - 19
 
@@ -612,6 +614,46 @@ def _wire_obj(row, hwid, cv=""):
             "version_active": False, "ttl": 600, "exp_at": now + 600, "st": now,
             "seller": row["seller"] or SELLER_DEFAULT, "note": None, "trial": False}
 
+def _record_sid(sid):
+    """Remember a session id this panel issued, so the offsets endpoint
+    can honour it in X-Session-Token. Valid 3600 s. Capture-style: any
+    failure is swallowed and never affects a login."""
+    if not sid:
+        return
+    try:
+        con = db()
+        con.execute("INSERT OR IGNORE INTO issued_sids(sid,exp) VALUES(?,?)",
+                    (str(sid), int(time.time()) + 3600))
+        con.commit()
+        con.close()
+    except Exception:
+        pass
+
+def _sid_issued(sid):
+    if not sid:
+        return False
+    try:
+        con = db()
+        row = con.execute("SELECT exp FROM issued_sids WHERE sid=?",
+                          (str(sid),)).fetchone()
+        con.close()
+        return row is not None and int(row["exp"]) > int(time.time())
+    except Exception:
+        return False
+
+def vsp_offsets(token):
+    """Body for GET /offsets — the patched core's post-login pack fetch
+    (fn 0x85d90): it sends the login sid as X-Session-Token and reads
+    only the body (proto must be "VSP-WIRE-2", wire.pack non-empty)."""
+    now = int(time.time())
+    if _sid_issued(token):
+        return json.dumps({"success": True, "proto": "VSP-WIRE-2",
+                           "wire": {"ok": True, "version_active": True,
+                                    "ttl": 60, "exp_at": now + 60, "st": now,
+                                    "pack": GENUINE_PACK}}).encode()
+    return json.dumps({"success": False, "proto": "VSP-WIRE-2",
+                       "wire": {"ok": False, "pack": {}}}).encode()
+
 def vsp_stage1(payload):
     """Plaintext loader stage. Returns (http_code, obj). Mirrors the real
     server's shapes from live_probe_2026-11-17.json, plus the flat
@@ -627,6 +669,7 @@ def vsp_stage1(payload):
     if err:
         return 200, {"success": False, "error": err[1]}
     wire = _wire_obj(row, hwid)
+    _record_sid(wire["sid"])
     return 200, {"success": True, "proto": "VSP-WIRE-2", "wire": wire,
                  "expiry": row["expires"] + " 23:59:59",
                  "expiry_date": row["expires"],
@@ -807,7 +850,13 @@ def vsp_stage2(env, raw_body, headers, debug=None):
         else:
             debug["inner"] = pt.decode("utf-8", "replace")
         debug["reply_payload"] = payload
-    return 200, _stage2_seal_reply(kid, n_c, rid, shared, payload)
+    reply = _stage2_seal_reply(kid, n_c, rid, shared, payload)
+    if payload.get("success"):
+        # The core takes its X-Session-Token from the decrypted payload's
+        # sid; the envelope sid (hex(K4)) is recorded too, per build spec.
+        _record_sid(payload.get("sid"))
+        _record_sid(reply.get("sid"))
+    return 200, reply
 
 def _stage2_payload(inner):
     """Validate the decrypted inner payload against ghost_keys and build the
@@ -939,6 +988,10 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, open(core, "rb").read(), "application/octet-stream")
             else:
                 self._send(404, b"no core", "text/plain")
+            return
+        if path == "/offsets":
+            self._send(200, vsp_offsets(self.headers.get("X-Session-Token") or ""),
+                       "application/json")
             return
         if path in GHOST_OFFSET_PATHS:
             self._send(200, ghost_offsets(self.headers.get("X-Session-Token") or ""),
